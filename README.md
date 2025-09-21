@@ -4,6 +4,8 @@ A powerful command-line tool designed to intelligently merge script mods for the
 This tool was created to solve script .scr file conflicts.
 UTM uses a key-based analysis. Identifies specific functions and parameters within the script files. Then rebuilds final script file, line by line, using the original game file as a template.
 
+
+[Nexusmods Link](https://www.nexusmods.com/dyinglightthebeast/mods/140)
 ---
 
 ### Key Features
