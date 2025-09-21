@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
@@ -132,6 +132,12 @@ class Program
 
     static string GenerateMergedFileContent(ScriptFile original, List<ScriptFile> mods)
     {
+        var originalMap = original.Content.Replace("\r\n", "\n").Split('\n')
+            .Select(l => new { Key = TryParseKey(l), Line = l })
+            .Where(x => x.Key != null)
+            .GroupBy(x => x.Key!)
+            .ToDictionary(g => g.Key, g => g.First().Line);
+
         var modMaps = mods.Select(mod => new
         {
             SourcePak = mod.SourcePak,
@@ -152,6 +158,7 @@ class Program
         foreach (var originalLine in originalLines)
         {
             var key = TryParseKey(originalLine);
+
             if (key == null)
             {
                 finalContent.AppendLine(originalLine);
@@ -164,36 +171,44 @@ class Program
                 continue;
             }
 
-            var versions = new List<(string Line, string SourcePak)>();
+            var actualChanges = new List<(string Line, string SourcePak)>();
+            originalMap.TryGetValue(key, out var baseLine);
+
             foreach (var mod in modMaps)
             {
-                if (mod.Map.TryGetValue(key, out var modLine))
+                if (mod.Map.TryGetValue(key, out var modLine) && modLine != baseLine)
                 {
-                    versions.Add((modLine, mod.SourcePak));
+                    actualChanges.Add((modLine, mod.SourcePak));
                 }
             }
 
-            if (versions.Count == 0)
+            if (actualChanges.Count == 0)
             {
                 finalContent.AppendLine(originalLine);
             }
+            else if (actualChanges.Count == 1)
+            {
+                finalContent.AppendLine(actualChanges[0].Line);
+                resolutions[key] = actualChanges[0].Line;
+            }
             else
             {
-                var distinctVersions = versions.GroupBy(v => v.Line)
-                                               .Select(g => (Line: g.Key, Sources: g.Select(v => v.SourcePak).ToList()))
-                                               .ToList();
+                var distinctChanges = actualChanges.GroupBy(v => v.Line)
+                                                   .Select(g => (Line: g.Key, Sources: g.Select(v => v.SourcePak).ToList()))
+                                                   .ToList();
 
-                if (distinctVersions.Count == 1)
+                if (distinctChanges.Count == 1)
                 {
-                    finalContent.AppendLine(distinctVersions[0].Line);
+                    finalContent.AppendLine(distinctChanges[0].Line);
+                    resolutions[key] = distinctChanges[0].Line;
                 }
                 else
                 {
                     string chosenLine;
                     if (preferredModSource != null)
                     {
-                        var preferredVersion = distinctVersions.FirstOrDefault(v => v.Sources.Contains(preferredModSource));
-                        chosenLine = preferredVersion.Line ?? distinctVersions[0].Line;
+                        var preferredVersion = distinctChanges.FirstOrDefault(v => v.Sources.Contains(preferredModSource));
+                        chosenLine = preferredVersion.Line ?? distinctChanges[0].Line;
                         autoResolvedCount++;
                     }
                     else
@@ -204,33 +219,33 @@ class Program
                         Console.WriteLine($"  -> Conflict for key '{key}':");
                         Console.ResetColor();
 
-                        for (int i = 0; i < distinctVersions.Count; i++)
+                        for (int i = 0; i < distinctChanges.Count; i++)
                         {
-                            string sources = string.Join(", ", distinctVersions[i].Sources);
+                            string sources = string.Join(", ", distinctChanges[i].Sources);
                             Console.Write($"    {i + 1}. (");
                             Console.ForegroundColor = ConsoleColor.Yellow;
                             Console.Write(sources);
                             Console.ResetColor();
                             Console.Write("): ");
                             Console.ForegroundColor = ConsoleColor.Cyan;
-                            Console.WriteLine(distinctVersions[i].Line.Trim());
+                            Console.WriteLine(distinctChanges[i].Line.Trim());
                             Console.ResetColor();
                         }
 
-                        Console.WriteLine("   To prefer a mod for all conflicts in this file, add 'y' to your choice (e.g., '1y').");
+                        Console.WriteLine("   To prefer a mod for all conflicts in this file, add 'y' to your choice (e.g., '1y') (CAREFUL! THIS IS FOR ADVANCED USERS).");
 
                         int choice = -1;
                         string? chosenSource = null;
-                        while (choice < 1 || choice > distinctVersions.Count)
+                        while (choice < 1 || choice > distinctChanges.Count)
                         {
-                            Console.Write($"Please select the version to use (1-{distinctVersions.Count}): ");
+                            Console.Write($"Please select the version to use (1-{distinctChanges.Count}): ");
                             string? input = Console.ReadLine()?.ToLowerInvariant();
 
                             if (input != null && input.EndsWith("y"))
                             {
-                                if (int.TryParse(input.TrimEnd('y'), out choice) && choice >= 1 && choice <= distinctVersions.Count)
+                                if (int.TryParse(input.TrimEnd('y'), out choice) && choice >= 1 && choice <= distinctChanges.Count)
                                 {
-                                    chosenSource = distinctVersions[choice - 1].Sources.First();
+                                    chosenSource = distinctChanges[choice - 1].Sources.First();
                                 }
                             }
                             else
@@ -239,7 +254,7 @@ class Program
                             }
                         }
 
-                        chosenLine = distinctVersions[choice - 1].Line;
+                        chosenLine = distinctChanges[choice - 1].Line;
                         if (chosenSource != null)
                         {
                             preferredModSource = chosenSource;
@@ -259,7 +274,7 @@ class Program
         if (autoResolvedCount > 0)
         {
             Console.ForegroundColor = ConsoleColor.DarkGreen;
-            Console.WriteLine($"-> {autoResolvedCount} other conflicts in this file merged automatically using your preference: '{preferredModSource}'.\n");
+            Console.WriteLine($"-> {autoResolvedCount} other conflicts in this file merged using your preference: '{preferredModSource}'.\n");
             Console.ResetColor();
         }
 
