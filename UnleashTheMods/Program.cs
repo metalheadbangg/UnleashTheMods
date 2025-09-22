@@ -29,7 +29,7 @@ class Program
         string sourceDirectory = Path.Combine(baseDirectory, "source");
         string modsDirectory = Path.Combine(baseDirectory, "mods");
         string stagingDirectory = Path.Combine(baseDirectory, "staging_area");
-        string fixedModsDirectory = Path.Combine(baseDirectory, "fixed_mods"); // Folder for fixed mods
+        string fixedModsDirectory = Path.Combine(baseDirectory, "fixed_mods");
 
         if (!Directory.Exists(sourceDirectory) || !Directory.Exists(modsDirectory))
         {
@@ -42,7 +42,6 @@ class Program
 
         Console.WriteLine("'source' and 'mods' folders found.\n");
 
-        // Verify and fix mod folder structures
         string gamePakPath = Path.Combine(sourceDirectory, "data0.pak");
         if (!File.Exists(gamePakPath))
         {
@@ -60,7 +59,7 @@ class Program
         List<ScriptFile> originalScripts = LoadScriptsFromPakFiles(sourcePaks);
         Console.WriteLine($"{originalScripts.Count} scripts loaded from original game packages.");
 
-        List<ScriptFile> moddedScripts = LoadAllScriptsFromModsFolder(validMods); // Use valid mods
+        List<ScriptFile> moddedScripts = LoadAllScriptsFromModsFolder(validMods);
         Console.WriteLine($"{moddedScripts.Count} scripts loaded from the mods folder.\n");
 
         Console.WriteLine("--- Merging Initializing ---");
@@ -132,7 +131,6 @@ class Program
         Console.ReadKey();
     }
 
-    // Fix mod folder structures to match data0.pak
     static List<string> FixModStructures(string gamePakPath, string modsDirectory, string fixedModsDirectory)
     {
         var fileStructure = GetGameFileStructure(gamePakPath);
@@ -154,7 +152,6 @@ class Program
                 List<(string Name, string Path, Stream Content)> modScripts = new List<(string, string, Stream)>();
                 List<string> unknownFiles = new List<string>();
 
-                // Process mod
                 if (Path.GetExtension(modFile).ToLowerInvariant() == ".pak")
                 {
                     modScripts = ReadScriptsFromSinglePakForFixing(modFile, ref needsFixing, fileStructure, ref unknownFiles);
@@ -163,23 +160,19 @@ class Program
                 {
                     using (var archive = ArchiveFactory.Open(modFile))
                     {
-                        foreach (var entry in archive.Entries)
+                        foreach (var entry in archive.Entries.Where(e => !e.IsDirectory && e.Key.EndsWith(".pak", StringComparison.OrdinalIgnoreCase)))
                         {
-                            if (!entry.IsDirectory && entry.Key.EndsWith(".pak", StringComparison.OrdinalIgnoreCase))
+                            using (var pakEntryStream = entry.OpenEntryStream())
+                            using (var memoryStream = new MemoryStream())
                             {
-                                using (var pakEntryStream = entry.OpenEntryStream())
-                                using (var memoryStream = new MemoryStream())
-                                {
-                                    pakEntryStream.CopyTo(memoryStream);
-                                    memoryStream.Position = 0;
-                                    modScripts = ReadScriptsFromSinglePakForFixing(memoryStream, ref needsFixing, fileStructure, ref unknownFiles);
-                                }
+                                pakEntryStream.CopyTo(memoryStream);
+                                memoryStream.Position = 0;
+                                modScripts.AddRange(ReadScriptsFromSinglePakForFixing(memoryStream, ref needsFixing, fileStructure, ref unknownFiles));
                             }
                         }
                     }
                 }
 
-                // Handle files not found in data0.pak
                 if (unknownFiles.Any())
                 {
                     Console.ForegroundColor = ConsoleColor.Yellow;
@@ -196,7 +189,7 @@ class Program
                     if (input != "1")
                     {
                         Console.WriteLine($"Mod '{modName}' excluded due to unknown files.");
-                        continue; // Skip this mod
+                        continue;
                     }
                     else
                     {
@@ -208,7 +201,6 @@ class Program
 
                 if (needsFixing)
                 {
-                    // Create fixed .pak
                     using (var fixedPakStream = File.OpenWrite(fixedPakPath))
                     using (var writer = WriterFactory.Open(fixedPakStream, ArchiveType.Zip, new WriterOptions(CompressionType.Deflate)))
                     {
@@ -216,10 +208,10 @@ class Program
                         {
                             contentStream.Position = 0;
                             writer.Write(correctPath.Replace('\\', '/'), contentStream);
+                            contentStream.Dispose();
                         }
                     }
 
-                    // Create new ZIP with the fixed .pak
                     string fixedZipPath = Path.Combine(fixedModsDirectory, $"{modName}_fixed.zip");
                     using (var fixedZipStream = File.OpenWrite(fixedZipPath))
                     using (var writer = WriterFactory.Open(fixedZipStream, ArchiveType.Zip, new WriterOptions(CompressionType.Deflate)))
@@ -251,70 +243,54 @@ class Program
         return validMods;
     }
 
-    // Map folder structure of data0.pak
     static Dictionary<string, string> GetGameFileStructure(string gamePakPath)
     {
         var structure = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         using (var archive = ArchiveFactory.Open(gamePakPath))
         {
-            foreach (var entry in archive.Entries)
+            foreach (var entry in archive.Entries.Where(e => !e.IsDirectory && e.Key.EndsWith(".scr", StringComparison.OrdinalIgnoreCase)))
             {
-                if (!entry.IsDirectory && entry.Key.EndsWith(".scr", StringComparison.OrdinalIgnoreCase))
+                string fileName = Path.GetFileName(entry.Key);
+                string fullPath = entry.Key.Replace("/", "\\");
+                if (!structure.TryAdd(fileName, fullPath))
                 {
-                    string fileName = Path.GetFileName(entry.Key);
-                    string fullPath = entry.Key.Replace("/", "\\");
-                    if (!structure.ContainsKey(fileName))
-                    {
-                        structure[fileName] = fullPath;
-                    }
-                    else
-                    {
-                        Console.ForegroundColor = ConsoleColor.Yellow;
-                        Console.WriteLine($"Warning: Duplicate file '{fileName}' found at '{fullPath}' in data0.pak.");
-                        Console.ResetColor();
-                    }
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine($"Warning: Duplicate file '{fileName}' found at '{fullPath}' in data0.pak.");
+                    Console.ResetColor();
                 }
             }
         }
         return structure;
     }
 
-    // Read scripts from a .pak and check if fixing is needed
     static List<(string Name, string Path, Stream Content)> ReadScriptsFromSinglePakForFixing(Stream pakStream, ref bool needsFixing, Dictionary<string, string> fileStructure, ref List<string> unknownFiles)
     {
         var scripts = new List<(string Name, string Path, Stream Content)>();
         using (var pakArchive = ArchiveFactory.Open(pakStream))
         {
-            foreach (var entry in pakArchive.Entries)
+            foreach (var entry in pakArchive.Entries.Where(e => !e.IsDirectory && e.Key.EndsWith(".scr", StringComparison.OrdinalIgnoreCase)))
             {
-                if (!entry.IsDirectory && entry.Key.EndsWith(".scr", StringComparison.OrdinalIgnoreCase))
-                {
-                    string fileName = Path.GetFileName(entry.Key);
-                    string fullPath = entry.Key.Replace("/", "\\");
-                    string correctPath = fullPath;
+                string fileName = Path.GetFileName(entry.Key);
+                string modPath = entry.Key.Replace("/", "\\");
 
-                    // Check if file is in root (no subfolders)
-                    if (!fullPath.Contains("\\") || fullPath == fileName)
+                if (fileStructure.TryGetValue(fileName, out var correctPath))
+                {
+                    if (modPath != correctPath)
                     {
                         needsFixing = true;
-                        if (fileStructure.TryGetValue(fileName, out var path))
-                        {
-                            correctPath = path;
-                        }
-                        else
-                        {
-                            unknownFiles.Add(fullPath);
-                            continue; // Skip this file for now, handle later via user input
-                        }
                     }
 
+                    var memoryStream = new MemoryStream();
                     using (var entryStream = entry.OpenEntryStream())
                     {
-                        var memoryStream = new MemoryStream();
                         entryStream.CopyTo(memoryStream);
-                        memoryStream.Position = 0;
-                        scripts.Add((fileName, correctPath, memoryStream));
                     }
+                    memoryStream.Position = 0;
+                    scripts.Add((fileName, correctPath, memoryStream));
+                }
+                else
+                {
+                    unknownFiles.Add(modPath);
                 }
             }
         }
@@ -345,19 +321,15 @@ class Program
     static string GenerateMergedFileContent(ScriptFile original, List<ScriptFile> mods)
     {
         var originalMap = original.Content.Replace("\r\n", "\n").Split('\n')
-            .Select(l => new { Key = TryParseKey(l), Line = l })
-            .Where(x => x.Key != null)
-            .GroupBy(x => x.Key!)
-            .ToDictionary(g => g.Key, g => g.First().Line);
+            .Select(l => new { Key = TryParseKey(l), Line = l }).Where(x => x.Key != null)
+            .GroupBy(x => x.Key!).ToDictionary(g => g.Key, g => g.First().Line);
 
         var modMaps = mods.Select(mod => new
         {
             SourcePak = mod.SourcePak,
             Map = mod.Content.Replace("\r\n", "\n").Split('\n')
-                .Select(l => new { Key = TryParseKey(l), Line = l })
-                .Where(x => x.Key != null)
-                .GroupBy(x => x.Key!)
-                .ToDictionary(g => g.Key, g => g.First().Line)
+                .Select(l => new { Key = TryParseKey(l), Line = l }).Where(x => x.Key != null)
+                .GroupBy(x => x.Key!).ToDictionary(g => g.Key, g => g.First().Line)
         }).ToList();
 
         var finalContent = new StringBuilder();
@@ -403,8 +375,7 @@ class Program
             else
             {
                 var distinctChanges = actualChanges.GroupBy(v => v.Line)
-                                                   .Select(g => (Line: g.Key, Sources: g.Select(v => v.SourcePak).ToList()))
-                                                   .ToList();
+                    .Select(g => (Line: g.Key, Sources: g.Select(v => v.SourcePak).ToList())).ToList();
                 if (distinctChanges.Count == 1)
                 {
                     finalContent.AppendLine(distinctChanges[0].Line);
@@ -412,50 +383,60 @@ class Program
                 }
                 else
                 {
-                    Console.ForegroundColor = ConsoleColor.Red;
-                    Console.WriteLine($"\n[CHOICE REQUIRED] Conflict in '{original.FullPathInPak}'!");
-                    Console.ForegroundColor = ConsoleColor.Yellow;
-                    Console.WriteLine($" -> Conflict for key '{key}':");
-                    Console.ResetColor();
-                    for (int i = 0; i < distinctChanges.Count; i++)
+                    string chosenLine;
+                    if (preferredModSource != null)
                     {
-                        string sources = string.Join(", ", distinctChanges[i].Sources);
-                        Console.Write($" {i + 1}. (");
-                        Console.ForegroundColor = ConsoleColor.Yellow;
-                        Console.Write(sources);
-                        Console.ResetColor();
-                        Console.Write("): ");
-                        Console.ForegroundColor = ConsoleColor.Cyan;
-                        Console.WriteLine(distinctChanges[i].Line.Trim());
-                        Console.ResetColor();
+                        var preferredVersion = distinctChanges.FirstOrDefault(v => v.Sources.Contains(preferredModSource));
+                        chosenLine = preferredVersion.Line ?? distinctChanges[0].Line;
+                        autoResolvedCount++;
                     }
-                    Console.WriteLine(" To prefer a mod for all conflicts in this file, add 'y' to your choice (e.g., '1y') (CAREFUL! THIS IS FOR ADVANCED USERS).");
-                    int choice = -1;
-                    string? chosenSource = null;
-                    while (choice < 1 || choice > distinctChanges.Count)
+                    else
                     {
-                        Console.Write($"Please select the version to use (1-{distinctChanges.Count}): ");
-                        string? input = Console.ReadLine()?.ToLowerInvariant();
-                        if (input != null && input.EndsWith("y"))
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.WriteLine($"\n[CHOICE REQUIRED] Conflict in '{original.FullPathInPak}'!");
+                        Console.ForegroundColor = ConsoleColor.Yellow;
+                        Console.WriteLine($" -> Conflict for key '{key}':");
+                        Console.ResetColor();
+                        for (int i = 0; i < distinctChanges.Count; i++)
                         {
-                            if (int.TryParse(input.TrimEnd('y'), out choice) && choice >= 1 && choice <= distinctChanges.Count)
+                            string sources = string.Join(", ", distinctChanges[i].Sources);
+                            Console.Write($" {i + 1}. (");
+                            Console.ForegroundColor = ConsoleColor.Yellow;
+                            Console.Write(sources);
+                            Console.ResetColor();
+                            Console.Write("): ");
+                            Console.ForegroundColor = ConsoleColor.Cyan;
+                            Console.WriteLine(distinctChanges[i].Line.Trim());
+                            Console.ResetColor();
+                        }
+                        Console.WriteLine(" To prefer a mod for all conflicts in this file, add 'y' to your choice (e.g., '1y') (CAREFUL! THIS IS FOR ADVANCED USERS).");
+                        int choice = -1;
+                        string? chosenSource = null;
+                        while (choice < 1 || choice > distinctChanges.Count)
+                        {
+                            Console.Write($"Please select the version to use (1-{distinctChanges.Count}): ");
+                            string? input = Console.ReadLine()?.ToLowerInvariant();
+                            if (input != null && input.EndsWith("y"))
                             {
-                                chosenSource = distinctChanges[choice - 1].Sources.First();
+                                if (int.TryParse(input.TrimEnd('y'), out choice) && choice >= 1 && choice <= distinctChanges.Count)
+                                {
+                                    chosenSource = distinctChanges[choice - 1].Sources.First();
+                                }
+                            }
+                            else
+                            {
+                                int.TryParse(input, out choice);
                             }
                         }
-                        else
+                        chosenLine = distinctChanges[choice - 1].Line;
+                        if (chosenSource != null)
                         {
-                            int.TryParse(input, out choice);
+                            preferredModSource = chosenSource;
                         }
+                        Console.ForegroundColor = ConsoleColor.Green;
+                        Console.WriteLine(" -> Choice applied.");
+                        Console.ResetColor();
                     }
-                    string chosenLine = distinctChanges[choice - 1].Line;
-                    if (chosenSource != null)
-                    {
-                        preferredModSource = chosenSource;
-                    }
-                    Console.ForegroundColor = ConsoleColor.Green;
-                    Console.WriteLine(" -> Choice applied.");
-                    Console.ResetColor();
                     finalContent.AppendLine(chosenLine);
                     resolutions[key] = chosenLine;
                 }
@@ -475,8 +456,6 @@ class Program
     static List<ScriptFile> LoadAllScriptsFromModsFolder(IEnumerable<string> modFiles)
     {
         var allScripts = new List<ScriptFile>();
-        var supportedExtensions = new[] { ".pak", ".zip", ".rar", ".7z" };
-
         foreach (var modFilePath in modFiles)
         {
             try
@@ -490,17 +469,14 @@ class Program
                 {
                     using (var archive = ArchiveFactory.Open(modFilePath))
                     {
-                        foreach (var entry in archive.Entries)
+                        foreach (var entry in archive.Entries.Where(e => !e.IsDirectory && e.Key.EndsWith(".pak", StringComparison.OrdinalIgnoreCase)))
                         {
-                            if (!entry.IsDirectory && entry.Key.EndsWith(".pak", StringComparison.OrdinalIgnoreCase))
+                            using (var pakEntryStream = entry.OpenEntryStream())
+                            using (var memoryStream = new MemoryStream())
                             {
-                                using (var pakEntryStream = entry.OpenEntryStream())
-                                using (var memoryStream = new MemoryStream())
-                                {
-                                    pakEntryStream.CopyTo(memoryStream);
-                                    memoryStream.Position = 0;
-                                    allScripts.AddRange(ReadScriptsFromSinglePak(memoryStream, sourceName));
-                                }
+                                pakEntryStream.CopyTo(memoryStream);
+                                memoryStream.Position = 0;
+                                allScripts.AddRange(ReadScriptsFromSinglePak(memoryStream, sourceName));
                             }
                         }
                     }
@@ -524,20 +500,17 @@ class Program
         {
             using (var pakArchive = ArchiveFactory.Open(pakStream))
             {
-                foreach (var entry in pakArchive.Entries)
+                foreach (var entry in pakArchive.Entries.Where(e => !e.IsDirectory && e.Key.EndsWith(".scr", StringComparison.OrdinalIgnoreCase)))
                 {
-                    if (!entry.IsDirectory && entry.Key.EndsWith(".scr", StringComparison.OrdinalIgnoreCase))
+                    using (var scrStream = entry.OpenEntryStream())
+                    using (var reader = new StreamReader(scrStream, Encoding.UTF8))
                     {
-                        using (var scrStream = entry.OpenEntryStream())
-                        using (var reader = new StreamReader(scrStream, Encoding.UTF8))
+                        scripts.Add(new ScriptFile
                         {
-                            scripts.Add(new ScriptFile
-                            {
-                                Content = reader.ReadToEnd(),
-                                FullPathInPak = entry.Key.Replace('\\', '/'),
-                                SourcePak = sourceName
-                            });
-                        }
+                            Content = reader.ReadToEnd(),
+                            FullPathInPak = entry.Key.Replace('\\', '/'),
+                            SourcePak = sourceName
+                        });
                     }
                 }
             }
